@@ -1,4 +1,3 @@
-# app.py
 import os
 import streamlit as st
 import pandas as pd
@@ -6,9 +5,9 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 import json
-from math import pi
 import networkx as nx
-from network_batch_pipeline_model import solve_batch_pipeline
+from io import BytesIO
+# from network_batch_pipeline_model import solve_batch_pipeline  # Uncomment after backend ready
 
 st.set_page_config(page_title="Pipeline Optima™ Network Batch Scheduler", layout="wide")
 
@@ -22,141 +21,136 @@ st.markdown(
 )
 st.markdown("<hr style='margin-top:0.6em; margin-bottom:1.2em; border: 1px solid #e1e5ec;'>", unsafe_allow_html=True)
 
-# --- SIDEBAR INPUT ---
-with st.sidebar:
-    st.title("Pipeline Network Input")
-    st.write("All flow/demand units: m³/hr or m³ (monthly)")
-    st.markdown("#### Nodes (Stations/Demand Centers)")
+# ----- MAIN INPUT SECTION (Tabs) -----
+tab_nodes, tab_edges, tab_pumps, tab_peaks = st.tabs(["Nodes", "Edges", "Pumps", "Peaks"])
+
+with tab_nodes:
+    st.subheader("Stations / Demand Centers")
+    if "nodes_df" not in st.session_state:
+        st.session_state["nodes_df"] = pd.DataFrame(columns=["Name", "Elevation (m)", "Density (kg/m³)", "Viscosity (cSt)", "Monthly Demand (m³)"])
     nodes_df = st.data_editor(
-        pd.DataFrame(columns=["ID", "Name", "Elevation (m)", "Density (kg/m³)", "Viscosity (cSt)", "Monthly Demand (m³)"]),
-        num_rows="dynamic", key="nodes_df"
+        st.session_state["nodes_df"], num_rows="dynamic", key="nodes_df_editor"
     )
-    st.markdown("#### Edges (Pipes/Branches)")
-    edges_df = st.data_editor(
-        pd.DataFrame(columns=["ID", "From Node", "To Node", "Length (km)", "Diameter (m)", "Thickness (m)", "Max DR (%)", "Roughness (m)"]),
-        num_rows="dynamic", key="edges_df"
-    )
-    st.markdown("#### Pumps")
-    pumps_df = st.data_editor(
-        pd.DataFrame(columns=[
-            "ID", "Node ID", "Branch To", "Power Type", "No. Pumps", "Min RPM", "Max RPM",
-            "SFC (Diesel)", "Grid Rate (INR/kWh)"
-        ]),
-        num_rows="dynamic", key="pumps_df"
-    )
-    st.markdown("#### Peaks (Optional)")
+    st.session_state["nodes_df"] = nodes_df
+
+node_names = list(nodes_df["Name"].dropna().unique())
+
+with tab_edges:
+    st.subheader("Pipes / Branches")
+    if "edges_df" not in st.session_state:
+        st.session_state["edges_df"] = pd.DataFrame(columns=["From Node", "To Node", "Length (km)", "Diameter (m)", "Thickness (m)", "Max DR (%)", "Roughness (m)"])
+    edges_df = st.session_state["edges_df"]
+
+    # For each row, allow selection from dropdowns for From Node and To Node
+    edge_entries = []
+    for idx in range(max(len(edges_df), 1)):
+        col1, col2 = st.columns(2)
+        from_node = col1.selectbox(f"From Node {idx+1}", node_names, key=f"from_node_{idx}") if node_names else ""
+        to_node = col2.selectbox(f"To Node {idx+1}", node_names, key=f"to_node_{idx}") if node_names else ""
+        col3, col4, col5 = st.columns(3)
+        length = col3.number_input(f"Length (km) {idx+1}", min_value=0.0, value=100.0, step=1.0, key=f"len_{idx}")
+        diameter = col4.number_input(f"Diameter (m) {idx+1}", min_value=0.0, value=0.762, step=0.01, key=f"dia_{idx}")
+        thickness = col5.number_input(f"Thickness (m) {idx+1}", min_value=0.0, value=0.007, step=0.001, key=f"thick_{idx}")
+        col6, col7 = st.columns(2)
+        max_dr = col6.number_input(f"Max DR (%) {idx+1}", min_value=0.0, value=40.0, step=1.0, key=f"dr_{idx}")
+        roughness = col7.number_input(f"Roughness (m) {idx+1}", min_value=0.0, value=0.00004, format="%.5f", step=0.00001, key=f"rough_{idx}")
+        edge_entries.append({
+            "From Node": from_node, "To Node": to_node, "Length (km)": length, "Diameter (m)": diameter,
+            "Thickness (m)": thickness, "Max DR (%)": max_dr, "Roughness (m)": roughness
+        })
+    st.session_state["edges_df"] = pd.DataFrame(edge_entries)
+
+with tab_pumps:
+    st.subheader("Pumping Units")
+    if "pumps_df" not in st.session_state:
+        st.session_state["pumps_df"] = pd.DataFrame(columns=[
+            "Station Name", "Branch To", "Power Type", "No. Pumps", "Min RPM", "Max RPM", "SFC (Diesel)", "Grid Rate (INR/kWh)", "Head Curve CSV", "Efficiency Curve CSV"
+        ])
+    pumps_df = st.session_state["pumps_df"]
+    pump_entries = []
+    for idx in range(max(len(pumps_df), 1)):
+        col1, col2 = st.columns(2)
+        stn_name = col1.selectbox(f"Station Name {idx+1}", node_names, key=f"pump_stn_{idx}") if node_names else ""
+        branch_to = col2.selectbox(f"Branch To {idx+1}", node_names, key=f"branch_to_{idx}") if node_names else ""
+        col3, col4 = st.columns(2)
+        power_type = col3.selectbox(f"Power Type {idx+1}", ["Grid", "Diesel"], key=f"ptype_{idx}")
+        n_pumps = col4.number_input(f"No. Pumps {idx+1}", min_value=1, value=1, step=1, key=f"npumps_{idx}")
+        col5, col6 = st.columns(2)
+        min_rpm = col5.number_input(f"Min RPM {idx+1}", min_value=0, value=1000, step=50, key=f"minrpm_{idx}")
+        max_rpm = col6.number_input(f"Max RPM {idx+1}", min_value=0, value=1500, step=50, key=f"maxrpm_{idx}")
+        col7, col8 = st.columns(2)
+        sfc = col7.number_input(f"SFC (Diesel) {idx+1}", min_value=0.0, value=150.0, step=1.0, key=f"sfc_{idx}")
+        grid_rate = col8.number_input(f"Grid Rate (INR/kWh) {idx+1}", min_value=0.0, value=9.0, step=0.1, key=f"grid_{idx}")
+        head_csv = st.file_uploader(f"Pump Head Curve CSV {idx+1}", type="csv", key=f"headcsv_{idx}")
+        eff_csv = st.file_uploader(f"Pump Eff Curve CSV {idx+1}", type="csv", key=f"effcsv_{idx}")
+        pump_entries.append({
+            "Station Name": stn_name, "Branch To": branch_to, "Power Type": power_type, "No. Pumps": n_pumps,
+            "Min RPM": min_rpm, "Max RPM": max_rpm, "SFC (Diesel)": sfc, "Grid Rate (INR/kWh)": grid_rate,
+            "Head Curve CSV": head_csv, "Efficiency Curve CSV": eff_csv
+        })
+    st.session_state["pumps_df"] = pd.DataFrame(pump_entries)
+
+with tab_peaks:
+    st.subheader("Elevation Peaks (Optional)")
+    edge_ids = [f"E{i+1}" for i in range(len(st.session_state.get("edges_df", [])))]
+    if "peaks_df" not in st.session_state:
+        st.session_state["peaks_df"] = pd.DataFrame(columns=["Edge ID", "Location (km)", "Elevation (m)"])
     peaks_df = st.data_editor(
-        pd.DataFrame(columns=["Edge ID", "Location (km)", "Elevation (m)"]),
-        num_rows="dynamic", key="peaks_df"
+        st.session_state["peaks_df"], num_rows="dynamic", key="peaks_df_editor"
     )
-    st.markdown("#### Global & Cost")
-    dra_cost = st.number_input("DRA Cost (INR/L)", value=500.0, step=1.0)
-    diesel_price = st.number_input("Diesel Price (INR/L)", value=70.0, step=0.5)
-    grid_price = st.number_input("Grid Electricity (INR/kWh)", value=9.0, step=0.1)
-    min_v = st.number_input("Min velocity (m/s)", value=0.5)
-    max_v = st.number_input("Max velocity (m/s)", value=3.0)
-    time_horizon = st.number_input("Scheduling Horizon (hours)", value=720, step=24)
+    st.session_state["peaks_df"] = peaks_df
 
-def parse_nodes(nodes_df):
-    nodes = []
-    for _, row in nodes_df.iterrows():
-        if row['ID']:
-            nodes.append({
-                "id": str(row['ID']), "name": str(row['Name']),
-                "elevation": float(row['Elevation (m)']),
-                "density": float(row['Density (kg/m³)']),
-                "viscosity": float(row['Viscosity (cSt)'])
-            })
-    return nodes
+st.markdown("---")
 
-def parse_edges(edges_df):
-    edges = []
-    for _, row in edges_df.iterrows():
-        if row['ID'] and row['From Node'] and row['To Node']:
-            edges.append({
-                "id": str(row['ID']), "from_node": str(row['From Node']), "to_node": str(row['To Node']),
-                "length_km": float(row['Length (km)']), "diameter_m": float(row['Diameter (m)']),
-                "thickness_m": float(row['Thickness (m)']), "max_dr": float(row['Max DR (%)']),
-                "roughness": float(row['Roughness (m)']) if not pd.isna(row['Roughness (m)']) else 0.00004
-            })
-    return edges
+# ----- OTHER PARAMETERS -----
+colA, colB, colC, colD = st.columns(4)
+dra_cost = colA.number_input("DRA Cost (INR/L)", value=500.0, step=1.0)
+diesel_price = colB.number_input("Diesel Price (INR/L)", value=70.0, step=0.5)
+grid_price = colC.number_input("Grid Electricity (INR/kWh)", value=9.0, step=0.1)
+time_horizon = colD.number_input("Scheduling Horizon (hours)", value=720, step=24)
 
-def parse_pumps(pumps_df):
-    pumps = []
-    for _, row in pumps_df.iterrows():
-        if row['ID'] and row['Node ID']:
-            pumps.append({
-                "id": str(row['ID']), "node_id": str(row['Node ID']),
-                "branch_to": str(row['Branch To']) if row['Branch To'] else None,
-                "power_type": row['Power Type'], "n_max": int(row['No. Pumps']),
-                "min_rpm": int(row['Min RPM']), "max_rpm": int(row['Max RPM']),
-                "sfc": float(row['SFC (Diesel)']) if not pd.isna(row['SFC (Diesel)']) else 0.0,
-                "grid_rate": float(row['Grid Rate (INR/kWh)']) if not pd.isna(row['Grid Rate (INR/kWh)']) else 0.0,
-                # You can add logic to let user upload/fit pump curves here if desired
-                "A": -0.0002, "B": 0.25, "C": 40, "P": -1e-8, "Q": 5e-6, "R": -0.0008, "S": 0.17, "T": 55
-            })
-    return pumps
+min_v = st.number_input("Min velocity (m/s)", value=0.5)
+max_v = st.number_input("Max velocity (m/s)", value=3.0)
 
-def parse_peaks(peaks_df):
-    edge_peaks = dict()
-    for _, row in peaks_df.iterrows():
-        if row['Edge ID']:
-            e = str(row['Edge ID'])
-            pk = {"location_km": float(row['Location (km)']), "elevation_m": float(row['Elevation (m)'])}
-            if e not in edge_peaks:
-                edge_peaks[e] = []
-            edge_peaks[e].append(pk)
-    return edge_peaks
-
-def get_demands(nodes_df):
-    demands = dict()
-    for _, row in nodes_df.iterrows():
-        if not pd.isna(row['Monthly Demand (m³)']) and float(row['Monthly Demand (m³)']) > 0:
-            demands[str(row['ID'])] = float(row['Monthly Demand (m³)'])
-    return demands
-
-# --- NETWORK VISUALIZATION ---
+# --------- NETWORK VISUALIZATION ---------
 def visualize_network(nodes, edges):
-    if not nodes or not edges: return
     G = nx.DiGraph()
     for n in nodes:
-        G.add_node(n['id'], label=n['name'])
+        G.add_node(n)
     for e in edges:
-        G.add_edge(e['from_node'], e['to_node'], label=e['id'])
+        if e["From Node"] and e["To Node"]:
+            G.add_edge(e["From Node"], e["To Node"])
     pos = nx.spring_layout(G, seed=42)
     fig = go.Figure()
-    # Edges
     for e in edges:
-        x0, y0 = pos[e['from_node']]
-        x1, y1 = pos[e['to_node']]
-        fig.add_trace(go.Scatter(
-            x=[x0, x1], y=[y0, y1], mode='lines', line=dict(width=2, color='black'),
-            hoverinfo='none', showlegend=False
-        ))
-    # Nodes
+        if e["From Node"] and e["To Node"]:
+            x0, y0 = pos[e["From Node"]]
+            x1, y1 = pos[e["To Node"]]
+            fig.add_trace(go.Scatter(x=[x0, x1], y=[y0, y1], mode='lines', line=dict(width=2, color='black'), hoverinfo='none', showlegend=False))
     for n in nodes:
-        x, y = pos[n['id']]
-        fig.add_trace(go.Scatter(
-            x=[x], y=[y], mode='markers+text', marker=dict(size=20, color='#1f77b4'),
-            text=n['name'], textposition="bottom center", showlegend=False
-        ))
+        x, y = pos[n]
+        fig.add_trace(go.Scatter(x=[x], y=[y], mode='markers+text', marker=dict(size=20, color='#1f77b4'), text=n, textposition="bottom center", showlegend=False))
     fig.update_layout(
-        plot_bgcolor='#181818', paper_bgcolor='#181818',
+        plot_bgcolor='#fff', paper_bgcolor='#fff',
         xaxis=dict(visible=False), yaxis=dict(visible=False),
-        title="Pipeline Network Visualization", height=400, margin=dict(l=20, r=20, t=50, b=20)
+        title="Pipeline Network Visualization", height=450, margin=dict(l=20, r=20, t=50, b=20)
     )
     st.plotly_chart(fig, use_container_width=True)
 
-# ---- MAIN UI ----
 st.header("Network Preview")
-nodes = parse_nodes(nodes_df)
-edges = parse_edges(edges_df)
-pumps = parse_pumps(pumps_df)
-peaks = parse_peaks(peaks_df)
-demands = get_demands(nodes_df)
-if len(nodes) >= 2 and len(edges) >= 1:
-    visualize_network(nodes, edges)
+if node_names and len(st.session_state["edges_df"]) >= 1:
+    visualize_network(node_names, st.session_state["edges_df"].to_dict(orient="records"))
 
+# ---- Backend Call and Results (Insert backend and output tabs here as before) ----
+# Example:
+# if st.button("🚀 Run Batch Network Optimization"):
+#     ... call your backend ...
+#     ... show results tabs as per earlier version ...
+
+st.markdown(
+    "<div style='text-align: center; color: gray; margin-top: 2em; font-size: 0.9em;'>&copy; 2025 Pipeline Optima™ v2.0. Developed by Parichay Das. All rights reserved.</div>",
+    unsafe_allow_html=True
+)
 # ---- RUN OPTIMIZATION ----
 if st.button("🚀 Run Batch Network Optimization"):
     with st.spinner("Running MINLP solver... (Can take several minutes)"):
