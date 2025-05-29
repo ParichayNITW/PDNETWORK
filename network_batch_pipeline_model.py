@@ -9,7 +9,7 @@ from math import pi
 from io import BytesIO
 from fpdf import FPDF
 import networkx as nx
-from network_batch_pipeline_model import solve_batch_pipeline  # Make sure backend is present!
+#from network_batch_pipeline_model import solve_batch_pipeline  # Make sure backend is present!
 
 st.set_page_config(page_title="Pipeline Optima™ Network Batch Scheduler", layout="wide")
 
