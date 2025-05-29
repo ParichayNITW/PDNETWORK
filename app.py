@@ -141,16 +141,7 @@ st.header("Network Preview")
 if node_names and len(st.session_state["edges_df"]) >= 1:
     visualize_network(node_names, st.session_state["edges_df"].to_dict(orient="records"))
 
-# ---- Backend Call and Results (Insert backend and output tabs here as before) ----
-# Example:
-# if st.button("🚀 Run Batch Network Optimization"):
-#     ... call your backend ...
-#     ... show results tabs as per earlier version ...
 
-st.markdown(
-    "<div style='text-align: center; color: gray; margin-top: 2em; font-size: 0.9em;'>&copy; 2025 Pipeline Optima™ v2.0. Developed by Parichay Das. All rights reserved.</div>",
-    unsafe_allow_html=True
-)
 # ---- RUN OPTIMIZATION ----
 if st.button("🚀 Run Batch Network Optimization"):
     with st.spinner("Running MINLP solver... (Can take several minutes)"):
