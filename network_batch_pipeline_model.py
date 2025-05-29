@@ -1,3 +1,5 @@
+# network_batch_pipeline_model.py
+
 import pyomo.environ as pyo
 from pyomo.opt import SolverManagerFactory
 from math import pi, log10
@@ -18,7 +20,7 @@ def solve_batch_pipeline(
     edge_from = {e['id']: e['from_node'] for e in edges}
     edge_to   = {e['id']: e['to_node'] for e in edges}
     pump_node = {p['id']: p['node_id'] for p in pumps}
-    pump_branch_to = {p['id']: p.get('branch_to', edge_to.get(p['main_edge'], None)) for p in pumps}
+    pump_branch_to = {p['id']: p.get('branch_to', None) for p in pumps}
 
     length = {e['id']: e['length_km']*1000 for e in edges}
     diameter = {e['id']: e['diameter_m'] for e in edges}
@@ -167,10 +169,9 @@ def solve_batch_pipeline(
         for e in edges:
             eid = e['id']
             for t in range(1, time_horizon_hours+1):
-                # Assume dra (%) = ppm (for illustration; can add proper DRA curve logic)
                 dra_ppm = m.dra[eid, t]
                 Q = m.flow[eid, t]
-                dra_vol = dra_ppm * Q * 1000.0 / 1e6  # L/hr (if ppm = mg/L and flow in m3/hr)
+                dra_vol = dra_ppm * Q * 1000.0 / 1e6  # L/hr
                 dra_cost = dra_vol * dra_cost_per_litre
                 total_cost += dra_cost
         return total_cost
@@ -181,7 +182,6 @@ def solve_batch_pipeline(
     m.solutions.load_from(results)
 
     # ---- EXTRACT RESULTS ----
-    # All variables returned as: results_dict["flow"][(edge_id, t)] = value, etc.
     results_dict = {
         "flow": {(e, t): pyo.value(m.flow[e, t]) for e in m.E for t in m.T},
         "dra": {(e, t): pyo.value(m.dra[e, t]) for e in m.E for t in m.T},
