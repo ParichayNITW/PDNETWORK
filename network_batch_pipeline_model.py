@@ -1,68 +1,92 @@
-# network_batch_pipeline_model.py
-
 import pyomo.environ as pyo
 from pyomo.opt import SolverManagerFactory
 from math import pi, log10
 
+def inch_to_m(val):
+    # Utility: Convert inch to meter
+    try:
+        return float(val) * 0.0254
+    except:
+        return 0.0
+
 def solve_batch_pipeline(
-    nodes, edges, pumps, peaks, demands, time_horizon_hours,
+    stations, segments, pumps, peaks, demands, time_horizon_hours,
     dra_cost_per_litre, diesel_price, grid_price,
     min_velocity=0.5, max_velocity=3.0
 ):
+    # Build node/edge dictionaries
+    nodes = [n['Name'] for n in stations if n['Name']]
+    node_elev = {n['Name']: float(n['Elevation (m)']) for n in stations if n['Name']}
+    node_rho  = {n['Name']: float(n['Density (kg/m³)']) for n in stations if n['Name']}
+    node_visc = {n['Name']: float(n['Viscosity (cSt)']) for n in stations if n['Name']}
+    node_demand = {n['Name']: float(n['Monthly Demand (m³)']) for n in stations if n['Name'] and not pd.isna(n['Monthly Demand (m³)'])}
+
+    # Assign edge IDs
+    edge_ids = [f"E{i+1}" for i in range(len(segments))]
+    edge_from = {eid: seg["From"] for eid, seg in zip(edge_ids, segments)}
+    edge_to   = {eid: seg["To"] for eid, seg in zip(edge_ids, segments)}
+    edge_len  = {eid: float(seg["Length (km)"])*1000 for eid, seg in zip(edge_ids, segments)}
+    edge_diam = {eid: inch_to_m(seg["Diameter (inch)"]) for eid, seg in zip(edge_ids, segments)}
+    edge_thic = {eid: inch_to_m(seg["Thickness (inch)"]) for eid, seg in zip(edge_ids, segments)}
+    edge_maxdr= {eid: float(seg["Max DR (%)"]) for eid, seg in zip(edge_ids, segments)}
+    edge_rough= {eid: float(seg["Roughness (m)"]) for eid, seg in zip(edge_ids, segments)}
+
+    # Parse pumps
+    pump_ids = [f"P{i+1}" for i in range(len(pumps))]
+    pump_node = {pid: p["Station"] for pid, p in zip(pump_ids, pumps)}
+    pump_branch = {pid: p["Branch To"] for pid, p in zip(pump_ids, pumps)}
+    pump_ptype = {pid: p["Power Type"] for pid, p in zip(pump_ids, pumps)}
+    pump_nmax  = {pid: int(p["No. Pumps"]) for pid, p in zip(pump_ids, pumps)}
+    pump_minrpm= {pid: int(p["Min RPM"]) for pid, p in zip(pump_ids, pumps)}
+    pump_maxrpm= {pid: int(p["Max RPM"]) for pid, p in zip(pump_ids, pumps)}
+    pump_sfc   = {pid: float(p["SFC (Diesel)"]) for pid, p in zip(pump_ids, pumps)}
+    pump_gridr = {pid: float(p["Grid Rate (INR/kWh)"]) for pid, p in zip(pump_ids, pumps)}
+    # Default curves: You may extend this to load uploaded CSVs if needed!
+    # For now use some example coefficients
+    pump_head_curve = {pid: (-0.0002, 0.25, 40) for pid in pump_ids} # Quadratic: A, B, C
+    pump_eff_curve = {pid: (-1e-8, 5e-6, -0.0008, 0.17, 55) for pid in pump_ids} # 4th degree
+
+    # Peaks: {edge_id: [{location_km, elevation_m}, ...]}
+    edge_peaks = {}
+    if peaks and isinstance(peaks, list):
+        for p in peaks:
+            eid = p.get("Edge ID", "")
+            if eid in edge_ids:
+                edge_peaks.setdefault(eid, []).append({
+                    "location_km": float(p.get("Location (km)", 0)),
+                    "elevation_m": float(p.get("Elevation (m)", 0))
+                })
+
     m = pyo.ConcreteModel()
-
-    # ---- SETS ----
     m.T = pyo.RangeSet(1, time_horizon_hours)
-    m.N = pyo.Set(initialize=[n['id'] for n in nodes])
-    m.E = pyo.Set(initialize=[e['id'] for e in edges])
-    m.PUMP = pyo.Set(initialize=[p['id'] for p in pumps])
+    m.N = pyo.Set(initialize=nodes)
+    m.E = pyo.Set(initialize=edge_ids)
+    m.PUMP = pyo.Set(initialize=pump_ids)
 
-    edge_from = {e['id']: e['from_node'] for e in edges}
-    edge_to   = {e['id']: e['to_node'] for e in edges}
-    pump_node = {p['id']: p['node_id'] for p in pumps}
-    pump_branch_to = {p['id']: p.get('branch_to', None) for p in pumps}
-
-    length = {e['id']: e['length_km']*1000 for e in edges}
-    diameter = {e['id']: e['diameter_m'] for e in edges}
-    thickness = {e['id']: e['thickness_m'] for e in edges}
-    roughness = {e['id']: e.get('roughness', 0.00004) for e in edges}
-    max_dr = {e['id']: e.get('max_dr', 0.0) for e in edges}
-
-    elev = {n['id']: n['elevation'] for n in nodes}
-    density = {n['id']: n['density'] for n in nodes}
-    viscosity = {n['id']: n['viscosity'] for n in nodes}
-
-    # Costs and bounds
+    # Parameters
     m.dra_cost = pyo.Param(initialize=dra_cost_per_litre)
     m.diesel_price = pyo.Param(initialize=diesel_price)
     m.grid_price = pyo.Param(initialize=grid_price)
     m.min_v = pyo.Param(initialize=min_velocity)
     m.max_v = pyo.Param(initialize=max_velocity)
 
-    demand_nodes = set(demands.keys())
+    demand_nodes = set(node_demand.keys())
     m.demand_nodes = pyo.Set(initialize=demand_nodes)
-    m.demand_vol = pyo.Param(m.demand_nodes, initialize=demands)
-    edge_peaks = peaks
+    m.demand_vol = pyo.Param(m.demand_nodes, initialize=node_demand)
 
-    # ---- VARIABLES ----
+    # Variables
     m.flow = pyo.Var(m.E, m.T, domain=pyo.NonNegativeReals)
-    def dra_bounds(m, e, t): return (0, max_dr[e])
+    def dra_bounds(m, e, t): return (0, edge_maxdr[e])
     m.dra = pyo.Var(m.E, m.T, domain=pyo.NonNegativeReals, bounds=dra_bounds)
     m.rh = pyo.Var(m.N, m.T, domain=pyo.NonNegativeReals)
 
-    pump_max = {p['id']: p['n_max'] for p in pumps}
-    def n_bounds(m, p, t): return (0, pump_max[p])
+    def n_bounds(m, p, t): return (0, pump_nmax[p])
     m.num_pumps = pyo.Var(m.PUMP, m.T, domain=pyo.NonNegativeIntegers, bounds=n_bounds)
-
-    pump_min_rpm = {p['id']: p['min_rpm'] for p in pumps}
-    pump_max_rpm = {p['id']: p['max_rpm'] for p in pumps}
-    def rpm_bounds(m, p, t): return (0, pump_max_rpm[p])
+    def rpm_bounds(m, p, t): return (0, pump_maxrpm[p])
     m.pump_rpm = pyo.Var(m.PUMP, m.T, domain=pyo.NonNegativeReals, bounds=rpm_bounds)
     m.pump_on = pyo.Var(m.PUMP, m.T, domain=pyo.Binary)
 
-    # ---- CONSTRAINTS ----
-
-    # Flow continuity at each node, each hour
+    # Continuity at each node/hour
     def flow_continuity_rule(m, n, t):
         inflow = sum(m.flow[e, t] for e in m.E if edge_to[e] == n)
         outflow = sum(m.flow[e, t] for e in m.E if edge_from[e] == n)
@@ -79,15 +103,15 @@ def solve_batch_pipeline(
 
     # Pump logic: OFF => RPM and num_pumps zero
     def pump_rpm_status(m, p, t):
-        return m.pump_rpm[p, t] <= m.pump_on[p, t] * pump_max_rpm[p]
+        return m.pump_rpm[p, t] <= m.pump_on[p, t] * pump_maxrpm[p]
     m.pump_rpm_status = pyo.Constraint(m.PUMP, m.T, rule=pump_rpm_status)
     def pump_num_on(m, p, t):
-        return m.num_pumps[p, t] <= m.pump_on[p, t] * pump_max[p]
+        return m.num_pumps[p, t] <= m.pump_on[p, t] * pump_nmax[p]
     m.pump_num_on = pyo.Constraint(m.PUMP, m.T, rule=pump_num_on)
 
     # Velocity limits
     def velocity_limit(m, e, t):
-        d = diameter[e]
+        d = edge_diam[e]
         area = pi * d**2 / 4
         v = m.flow[e, t] / 3600.0 / area
         return pyo.inequality(m.min_v, v, m.max_v)
@@ -98,11 +122,11 @@ def solve_batch_pipeline(
     def sdh_head_rule(m, e, t):
         from_n = edge_from[e]
         to_n = edge_to[e]
-        d = diameter[e]
-        rough = roughness[e]
-        L = length[e]
-        rho = density[from_n]
-        kv = viscosity[from_n]
+        d = edge_diam[e]
+        rough = edge_rough[e]
+        L = edge_len[e]
+        rho = node_rho[from_n]
+        kv = node_visc[from_n]
         Q = m.flow[e, t]
         area = pi * d**2 / 4
         v = Q / 3600.0 / area
@@ -118,38 +142,35 @@ def solve_batch_pipeline(
         if e in edge_peaks:
             for pk in edge_peaks[e]:
                 pk_loss = f * ((pk['location_km']*1000)/d) * (v**2/(2*g)) * (1-DR_frac)
-                loss = max(loss, (pk['elevation_m'] - elev[from_n]) + pk_loss + 50)
+                loss = max(loss, (pk['elevation_m'] - node_elev[from_n]) + pk_loss + 50)
         # Pump head
         pump_head = 0
-        for p in pumps:
-            if pump_node[p['id']] == from_n and pump_branch_to[p['id']] == to_n:
-                a, b, c = p['A'], p['B'], p['C']
-                pump_rpm = m.pump_rpm[p['id'], t]
-                dol = p['max_rpm']
+        for pid in pump_ids:
+            if pump_node[pid] == from_n and pump_branch[pid] == to_n:
+                a, b, c = pump_head_curve[pid]
+                pump_rpm = m.pump_rpm[pid, t]
+                dol = pump_maxrpm[pid]
                 H = (a*Q**2 + b*Q + c)*(pump_rpm/dol)**2 if dol > 0 else 0
-                n_pump = m.num_pumps[p['id'], t]
+                n_pump = m.num_pumps[pid, t]
                 pump_head += H * n_pump
         return m.rh[from_n, t] + pump_head >= m.rh[to_n, t] + loss
     m.head_balance = pyo.Constraint(m.E, m.T, rule=sdh_head_rule)
 
-    # ---- OBJECTIVE FUNCTION ----
-    # Minimize total cost (power/fuel + DRA) over all hours
+    # Objective: total cost (power/fuel + DRA) over all hours
     def total_cost_rule(m):
         total_cost = 0
-        for p in pumps:
-            pid = p['id']
+        for pid in pump_ids:
             node_id = pump_node[pid]
-            power_type = p['power_type']
-            a, b, c = p['A'], p['B'], p['C']
-            P, Qc, R, S, T = p['P'], p['Q'], p['R'], p['S'], p['T']
-            dol = p['max_rpm']
-            sfc = p.get('sfc', 0)
-            rate = p.get('grid_rate', 0)
+            power_type = pump_ptype[pid]
+            a, b, c = pump_head_curve[pid]
+            P, Qc, R, S, T = pump_eff_curve[pid]
+            dol = pump_maxrpm[pid]
+            sfc = pump_sfc[pid]
+            rate = pump_gridr[pid]
             for t in range(1, time_horizon_hours+1):
-                # Identify main edge
-                edges_out = [e for e in edges if edge_from[e['id']] == node_id and edge_to[e['id']] == pump_branch_to[pid]]
+                edges_out = [e for e in edge_ids if edge_from[e] == node_id and edge_to[e] == pump_branch[pid]]
                 if not edges_out: continue
-                eid = edges_out[0]['id']
+                eid = edges_out[0]
                 Q = m.flow[eid, t]
                 pump_rpm = m.pump_rpm[pid, t]
                 n_pump = m.num_pumps[pid, t]
@@ -157,7 +178,7 @@ def solve_batch_pipeline(
                 Qe = Q * dol/pump_rpm if pump_rpm > 0 else Q
                 eff = (P*Qe**4 + Qc*Qe**3 + R*Qe**2 + S*Qe + T)/100.0 if pump_rpm > 0 else 0.5
                 eff = max(0.05, eff)
-                rho_val = density[node_id]
+                rho_val = node_rho[node_id]
                 pwr_kW = (rho_val * Q * 9.81 * H * n_pump)/(3600.0 * 1000.0 * eff * 0.95)
                 if power_type.lower() == "grid":
                     cost = pwr_kW * grid_price
@@ -165,13 +186,12 @@ def solve_batch_pipeline(
                     fuel_per_kWh = (sfc*1.34102)/820.0
                     cost = pwr_kW * fuel_per_kWh * diesel_price
                 total_cost += cost
-        # Add DRA cost
-        for e in edges:
-            eid = e['id']
+        # DRA cost
+        for e in edge_ids:
             for t in range(1, time_horizon_hours+1):
-                dra_ppm = m.dra[eid, t]
-                Q = m.flow[eid, t]
-                dra_vol = dra_ppm * Q * 1000.0 / 1e6  # L/hr
+                dra_ppm = m.dra[e, t]
+                Q = m.flow[e, t]
+                dra_vol = dra_ppm * Q * 1000.0 / 1e6
                 dra_cost = dra_vol * dra_cost_per_litre
                 total_cost += dra_cost
         return total_cost
