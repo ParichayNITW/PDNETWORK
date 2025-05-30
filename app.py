@@ -1,27 +1,16 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-import json
-import networkx as nx
 from streamlit_agraph import agraph, Node, Edge, Config
 from network_batch_pipeline_model import solve_batch_pipeline
+import os
 
 st.set_page_config(page_title="Pipeline Optima™ Network Batch Scheduler", layout="wide")
 
-st.markdown(
-    "<h1 style='text-align:center;font-size:3.4rem;font-weight:700;color:#232733;margin-bottom:0.25em;margin-top:0.01em;'>Pipeline Optima™ Network Batch Scheduler</h1>",
-    unsafe_allow_html=True
-)
-st.markdown(
-    "<div style='text-align:center;font-size:2.05rem;font-weight:700;color:#232733;margin-bottom:0.15em;margin-top:0.02em;'>MINLP Pipeline Network Optimization with Batch Scheduling</div>",
-    unsafe_allow_html=True
-)
-st.markdown("<hr style='margin-top:0.6em; margin-bottom:1.2em; border: 1px solid #e1e5ec;'>", unsafe_allow_html=True)
+st.title("Pipeline Optima™ Network Batch Scheduler")
 
-# --- NODES ---
+# ------------------- INPUT SECTION -------------------
+
 if "nodes_df" not in st.session_state:
     st.session_state["nodes_df"] = pd.DataFrame(columns=["Name", "Elevation (m)", "Density (kg/m³)", "Viscosity (cSt)", "Monthly Demand (m³)"])
 nodes_df = st.data_editor(
@@ -30,34 +19,22 @@ nodes_df = st.data_editor(
 st.session_state["nodes_df"] = nodes_df
 node_names = list(nodes_df["Name"].dropna().unique())
 
-# --- EDGES ---
 if "edges_df" not in st.session_state:
     st.session_state["edges_df"] = pd.DataFrame(columns=["From Node", "To Node", "Length (km)", "Diameter (in)", "Thickness (in)", "Max DR (%)", "Roughness (m)"])
-edges_df = st.session_state["edges_df"]
-edge_entries = []
-for idx in range(max(len(edges_df), 1)):
-    col1, col2 = st.columns(2)
-    from_node = col1.selectbox(f"From Node {idx+1}", node_names, key=f"from_node_{idx}") if node_names else ""
-    to_node = col2.selectbox(f"To Node {idx+1}", node_names, key=f"to_node_{idx}") if node_names else ""
-    col3, col4, col5 = st.columns(3)
-    length = col3.number_input(f"Length (km) {idx+1}", min_value=0.0, value=100.0, step=1.0, key=f"len_{idx}")
-    diameter = col4.number_input(f"Diameter (in) {idx+1}", min_value=0.0, value=30.0, step=0.01, key=f"dia_{idx}")
-    thickness = col5.number_input(f"Thickness (in) {idx+1}", min_value=0.0, value=0.28, step=0.01, key=f"thick_{idx}")
-    col6, col7 = st.columns(2)
-    max_dr = col6.number_input(f"Max DR (%) {idx+1}", min_value=0.0, value=40.0, step=1.0, key=f"dr_{idx}")
-    roughness = col7.number_input(f"Roughness (m) {idx+1}", min_value=0.0, value=0.00004, format="%.5f", step=0.00001, key=f"rough_{idx}")
-    edge_entries.append({
-        "From Node": from_node, "To Node": to_node, "Length (km)": length, "Diameter_in": diameter,
-        "Thickness_in": thickness, "Max DR (%)": max_dr, "Roughness (m)": roughness
-    })
-st.session_state["edges_df"] = pd.DataFrame(edge_entries)
+edges_df = st.data_editor(
+    st.session_state["edges_df"], num_rows="dynamic", key="edges_df_editor"
+)
+st.session_state["edges_df"] = edges_df
 
-# --- PUMPS ---
 if "pumps_df" not in st.session_state:
     st.session_state["pumps_df"] = pd.DataFrame(columns=[
-        "Station", "Branch To", "Power Type", "No. Pumps", "Min RPM", "Max RPM", "SFC (Diesel)", "Grid Rate (INR/kWh)", "A", "B", "C", "P", "Q", "R", "S", "T"
+        "Station", "Branch To", "Power Type", "No. Pumps", "Min RPM", "Max RPM", "SFC (Diesel)", "Grid Rate (INR/kWh)", "Head Curve CSV", "Efficiency Curve CSV"
     ])
 pumps_df = st.session_state["pumps_df"]
+
+st.write("**Upload Head and Efficiency curves for EACH pump below (CSV: Q,Head and Q,Eff columns required)!**")
+uploaded_head_files = []
+uploaded_eff_files = []
 pump_entries = []
 for idx in range(max(len(pumps_df), 1)):
     col1, col2 = st.columns(2)
@@ -72,23 +49,17 @@ for idx in range(max(len(pumps_df), 1)):
     col7, col8 = st.columns(2)
     sfc = col7.number_input(f"SFC (Diesel) {idx+1}", min_value=0.0, value=150.0, step=1.0, key=f"sfc_{idx}")
     grid_rate = col8.number_input(f"Grid Rate (INR/kWh) {idx+1}", min_value=0.0, value=9.0, step=0.1, key=f"grid_{idx}")
-    # Pump curve coefficients (or allow upload, can expand)
-    a = st.number_input(f"A (Head curve) {idx+1}", value=-0.0002, format="%.5f", key=f"A_{idx}")
-    b = st.number_input(f"B (Head curve) {idx+1}", value=0.25, format="%.5f", key=f"B_{idx}")
-    c = st.number_input(f"C (Head curve) {idx+1}", value=40.0, format="%.2f", key=f"C_{idx}")
-    p = st.number_input(f"P (Eff curve) {idx+1}", value=-1e-8, format="%.5g", key=f"P_{idx}")
-    q = st.number_input(f"Q (Eff curve) {idx+1}", value=5e-6, format="%.5g", key=f"Q_{idx}")
-    r = st.number_input(f"R (Eff curve) {idx+1}", value=-0.0008, format="%.5f", key=f"R_{idx}")
-    s = st.number_input(f"S (Eff curve) {idx+1}", value=0.17, format="%.2f", key=f"S_{idx}")
-    t = st.number_input(f"T (Eff curve) {idx+1}", value=55.0, format="%.2f", key=f"T_{idx}")
+    head_csv = st.file_uploader(f"Pump Head Curve CSV {idx+1}", type="csv", key=f"headcsv_{idx}")
+    eff_csv = st.file_uploader(f"Pump Eff Curve CSV {idx+1}", type="csv", key=f"effcsv_{idx}")
+
     pump_entries.append({
         "station": station, "branch_to": branch_to, "power_type": power_type, "no_pumps": no_pumps,
         "min_rpm": min_rpm, "max_rpm": max_rpm, "sfc": sfc, "grid_rate": grid_rate,
-        "A": a, "B": b, "C": c, "P": p, "Q": q, "R": r, "S": s, "T": t
+        "head_csv": head_csv, "eff_csv": eff_csv
     })
 st.session_state["pumps_df"] = pd.DataFrame(pump_entries)
 
-# --- PEAKS ---
+# --------- PEAKS ---------
 if "peaks_df" not in st.session_state:
     st.session_state["peaks_df"] = pd.DataFrame(columns=["Edge", "Location (km)", "Elevation (m)"])
 peaks_df = st.data_editor(
@@ -96,17 +67,7 @@ peaks_df = st.data_editor(
 )
 st.session_state["peaks_df"] = peaks_df
 
-st.markdown("---")
-colA, colB, colC, colD = st.columns(4)
-dra_cost = colA.number_input("DRA Cost (INR/L)", value=500.0, step=1.0)
-diesel_price = colB.number_input("Diesel Price (INR/L)", value=70.0, step=0.5)
-grid_price = colC.number_input("Grid Electricity (INR/kWh)", value=9.0, step=0.1)
-time_horizon = colD.number_input("Scheduling Horizon (hours)", value=720, step=24)
-
-min_v = st.number_input("Min velocity (m/s)", value=0.5)
-max_v = st.number_input("Max velocity (m/s)", value=3.0)
-
-# ----------- NETWORK VISUALIZATION -----------
+# --------- VISUALIZATION ---------
 def visualize_agraph(nodes_df, edges_df):
     nodes = []
     edges = []
@@ -132,7 +93,17 @@ st.header("Network Preview")
 if node_names and len(st.session_state["edges_df"]) >= 1:
     visualize_agraph(st.session_state["nodes_df"], st.session_state["edges_df"])
 
-# ----------- PARSE INPUTS FOR BACKEND -----------
+# --------- PARAMS ---------
+colA, colB, colC, colD = st.columns(4)
+dra_cost = colA.number_input("DRA Cost (INR/L)", value=500.0, step=1.0)
+diesel_price = colB.number_input("Diesel Price (INR/L)", value=70.0, step=0.5)
+grid_price = colC.number_input("Grid Electricity (INR/kWh)", value=9.0, step=0.1)
+time_horizon = colD.number_input("Scheduling Horizon (hours)", value=720, step=24)
+
+min_v = st.number_input("Min velocity (m/s)", value=0.5)
+max_v = st.number_input("Max velocity (m/s)", value=3.0)
+
+# --------- PARSE FOR BACKEND ---------
 def parse_nodes(df):
     return [
         {
@@ -146,25 +117,40 @@ def parse_edges(df):
     return [
         {
             "from_node": row["From Node"], "to_node": row["To Node"],
-            "length_km": float(row["Length (km)"]), "diameter_in": float(row["Diameter_in"]),
-            "thickness_in": float(row["Thickness_in"]), "max_dr": float(row["Max DR (%)"]),
+            "length_km": float(row["Length (km)"]), "diameter_in": float(row["Diameter (in)"]),
+            "thickness_in": float(row["Thickness (in)"]), "max_dr": float(row["Max DR (%)"]),
             "roughness": float(row["Roughness (m)"])
         }
         for _, row in df.iterrows() if pd.notna(row["From Node"]) and pd.notna(row["To Node"])
     ]
 
 def parse_pumps(df):
-    return [
-        {
-            "station": row["station"], "branch_to": row["branch_to"],
-            "power_type": row["power_type"], "no_pumps": int(row["no_pumps"]),
-            "min_rpm": int(row["min_rpm"]), "max_rpm": int(row["max_rpm"]),
-            "sfc": float(row["sfc"]), "grid_rate": float(row["grid_rate"]),
-            "A": float(row["A"]), "B": float(row["B"]), "C": float(row["C"]),
-            "P": float(row["P"]), "Q": float(row["Q"]), "R": float(row["R"]), "S": float(row["S"]), "T": float(row["T"])
-        }
-        for _, row in df.iterrows() if pd.notna(row["station"]) and pd.notna(row["branch_to"])
-    ]
+    # Parse curves from uploaded csv
+    pumps = []
+    for idx, row in df.iterrows():
+        if pd.notna(row["station"]) and pd.notna(row["branch_to"]):
+            # Parse curve
+            head_q = []
+            head_h = []
+            eff_q = []
+            eff_y = []
+            if row["head_csv"]:
+                df_head = pd.read_csv(row["head_csv"])
+                head_q = df_head.iloc[:, 0].values
+                head_h = df_head.iloc[:, 1].values
+            if row["eff_csv"]:
+                df_eff = pd.read_csv(row["eff_csv"])
+                eff_q = df_eff.iloc[:, 0].values
+                eff_y = df_eff.iloc[:, 1].values
+            pumps.append({
+                "station": row["station"], "branch_to": row["branch_to"],
+                "power_type": row["power_type"], "no_pumps": int(row["no_pumps"]),
+                "min_rpm": int(row["min_rpm"]), "max_rpm": int(row["max_rpm"]),
+                "sfc": float(row["sfc"]), "grid_rate": float(row["grid_rate"]),
+                "head_curve_q": head_q, "head_curve_h": head_h,
+                "eff_curve_q": eff_q, "eff_curve_y": eff_y
+            })
+    return pumps
 
 def parse_peaks(df):
     peaks = dict()
@@ -186,7 +172,7 @@ def get_demands(nodes_df):
             demands[row["Name"]] = float(row["Monthly Demand (m³)"])
     return demands
 
-# ---- RUN OPTIMIZATION ----
+# --------- RUN OPTIMIZATION ---------
 if st.button("🚀 Run Batch Network Optimization"):
     nodes = parse_nodes(st.session_state["nodes_df"])
     edges = parse_edges(st.session_state["edges_df"])
